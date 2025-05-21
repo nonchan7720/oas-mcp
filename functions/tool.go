@@ -42,36 +42,6 @@ func (tool *Tool) SetFunction(fn Function) *Tool {
 	return tool
 }
 
-// func (tool *Tool) Call(ctx context.Context, input string) (any, error) {
-// 	errInput := func(err error) error {
-// 		return fmt.Errorf("failed parse input: %w", err)
-// 	}
-// 	outputSchema := func() (string, error) {
-// 		if tool.schema != nil {
-// 			buf, err := json.Marshal(tool.schema)
-// 			if err != nil {
-// 				return "", errInput(err)
-// 			}
-// 			return fmt.Sprintf("The %s schema is required to execute %s.", buf, tool.name), nil
-// 		}
-// 		return "", errors.New("function call failed.")
-// 	}
-// 	args := make(map[string]any)
-// 	if input != "" && input != "None" {
-// 		if err := json.Unmarshal([]byte(input), &args); err != nil {
-// 			return outputSchema()
-// 		}
-// 	}
-// 	output, err := tool.fn(ctx, args)
-// 	if err != nil {
-// 		if errors.Is(err, ErrRequired) {
-// 			return outputSchema()
-// 		}
-// 		return "", err
-// 	}
-// 	return output, nil
-// }
-
 func (t *Tool) Execute(ctx context.Context, params map[string]any) (any, error) {
 	fnType := reflect.TypeOf(t.function)
 	fnValue := reflect.ValueOf(t.function)
@@ -198,15 +168,6 @@ func (t *Tool) Execute(ctx context.Context, params map[string]any) (any, error) 
 		}
 		return results[0].Interface(), errVal.Interface().(error)
 	}
-}
-
-func (tool *Tool) WithSchema(schema *Schema) *Tool {
-	tool.schema = schema
-	return tool
-}
-
-func (tool *Tool) Schema() *Schema {
-	return tool.schema
 }
 
 func (tool *Tool) ServerTool() server.ServerTool {
