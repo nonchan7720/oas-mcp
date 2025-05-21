@@ -1,0 +1,22 @@
+{
+  // You can use IntelliSense to learn about the available attributes.
+  // Hover over the existing attribute descriptions to display them.
+  // For more information, please check the following: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "mcp gen tool",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}/cmd/main.go",
+      "args": [
+        "-path",
+        "api/openapi.yaml",
+        "-output",
+        "example/app/gen/mcp"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+  ]
+}
