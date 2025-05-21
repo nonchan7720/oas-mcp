@@ -324,7 +324,7 @@ func generateMCPToolWithJennifer(operation *ir.Operation, outputPath string) err
 	if hasParams {
 		inputFields = append(inputFields,
 			jen.Id(reqParams).Qual(oasClient, operation.Name+"Params").Op(
-				fmt.Sprintf("`json:\"requestParameter\" doc:\"%s\"`", operation.Description),
+				fmt.Sprintf("`json:\"requestParameter\" mcpdescription:\"%s\"`", operation.Description),
 			),
 		)
 	}
