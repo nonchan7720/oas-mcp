@@ -1,0 +1,13 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    tty: true
+    volumes:
+      - ./:/src/
+      - ~/.gitconfig:/.gitconfig
+      - ~/.ssh/:/.ssh/
+      - vscode_extension:/home/user/.vscode-server/extensions
+volumes:
+  vscode_extension:

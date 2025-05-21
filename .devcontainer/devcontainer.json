@@ -1,0 +1,34 @@
+{
+  "name": "mcp-dev",
+  "dockerComposeFile": [
+    "../compose.yaml"
+  ],
+  "service": "dev",
+  "workspaceFolder": "/src",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "terminal.integrated.profiles.linux": {
+          "bash": {
+            "path": "/bin/bash"
+          }
+        }
+      },
+      "extensions": [
+        "golang.Go",
+        "yokoe.vscode-postfix-go",
+        "eamodio.gitlens",
+        "mhutchie.git-graph",
+        "christian-kohler.path-intellisense",
+        "streetsidesoftware.code-spell-checker",
+        "redhat.vscode-yaml",
+        "Gruntfuggly.todo-tree",
+        "ms-azuretools.vscode-docker",
+        "Arjun.swagger-viewer",
+        "github.vscode-github-actions"
+      ]
+    }
+  },
+  "postAttachCommand": "bash .devcontainer/attach-command.sh"
+}
