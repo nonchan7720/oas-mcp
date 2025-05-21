@@ -74,9 +74,9 @@ func main() {
 	if err := generateMCPTools(g, outputPath); err != nil {
 		log.Fatalf("Failed to generate MCP tools: %v", err)
 	}
-
+	hasSecuritySource := len(parsedSpec.Security) > 0 || len(parsedSpec.Components.SecuritySchemes) > 0
 	// MCP Server ファイルを生成
-	if err := generateMCPServer(g, outputPath); err != nil {
+	if err := generateMCPServer(g, hasSecuritySource, outputPath); err != nil {
 		log.Fatalf("Failed to generate MCP server: %v", err)
 	}
 
@@ -394,7 +394,7 @@ func generateMCPToolWithJennifer(operation *ir.Operation, outputPath string) err
 }
 
 // MCP Serverを生成
-func generateMCPServer(g *gen.Generator, outputPath string) error {
+func generateMCPServer(g *gen.Generator, hasSecuritySchemes bool, outputPath string) error {
 	// サーバーディレクトリ
 	serverDir := filepath.Join(outputPath, "server")
 
@@ -410,13 +410,12 @@ func generateMCPServer(g *gen.Generator, outputPath string) error {
 	}
 	// サーバーファイルパス
 	serverFilePath := filepath.Join(serverDir, "server.go")
-
 	// Jenniferを使ってサーバーコードを生成
-	return generateMCPServerWithJennifer(toolNames, serverFilePath)
+	return generateMCPServerWithJennifer(hasSecuritySchemes, toolNames, serverFilePath)
 }
 
 // Jenniferを使用してMCPサーバーコードを生成
-func generateMCPServerWithJennifer(toolNames []string, outputPath string) error {
+func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, outputPath string) error {
 	// パッケージパスを準備
 	outputDir := filepath.Dir(outputPath)
 	basePath := strings.TrimSuffix(outputDir, "/server")
@@ -444,7 +443,6 @@ func generateMCPServerWithJennifer(toolNames []string, outputPath string) error 
 	f.ImportName(oasClient, "client")
 	f.ImportName(toolsPath, "tools")
 
-	// StartServer関数の内容を構築
 	funcBody := []jen.Code{
 		jen.Comment("シャットダウンハンドリング"),
 		jen.List(jen.Id("ctx"), jen.Id("stop")).Op(":=").Qual("os/signal", "NotifyContext").Call(
@@ -455,9 +453,12 @@ func generateMCPServerWithJennifer(toolNames []string, outputPath string) error 
 		jen.Defer().Id("stop").Call(),
 		// クライアント初期化
 		jen.Comment("クライアント初期化"),
-		jen.List(jen.Id("client"), jen.Id("err")).Op(":=").Qual(oasClient, "NewClient").Call(
-			jen.Qual("os", "Getenv").Call(jen.Lit("API_BASE_URL")),
-		),
+		jen.List(jen.Id("client"), jen.Id("err")).Op(":=").Qual(oasClient, "NewClient").CallFunc(func(g *jen.Group) {
+			g.Qual("os", "Getenv").Call(jen.Lit("API_BASE_URL"))
+			if hasSecuritySource {
+				g.Id("securitySource")
+			}
+		}),
 		jen.If(jen.Id("err").Op("!=").Nil()).Block(
 			jen.Return(jen.Id("err")),
 		),
@@ -472,15 +473,12 @@ func generateMCPServerWithJennifer(toolNames []string, outputPath string) error 
 		jen.Comment("全ツールを登録"),
 	}
 
-	toolsFunc := make([]jen.Code, len(toolNames))
-	// 各ツールの登録処理を関数本体に追加
-	for idx, toolName := range toolNames {
-		toolsFunc[idx] = jen.Qual(toolsPath, "New"+toolName+"Tool").Call(jen.Id("client")).Dot("ServerTool").Call()
-	}
-
-	// シャットダウン処理を関数本体に追加
 	funcBody = append(funcBody,
-		jen.Id("mcpServer").Dot("AddTools").Call(toolsFunc...),
+		jen.Id("mcpServer").Dot("AddTools").Call(jen.ListFunc(func(g *jen.Group) {
+			for _, toolName := range toolNames {
+				g.Qual(toolsPath, "New"+toolName+"Tool").Call(jen.Id("client")).Dot("ServerTool").Call()
+			}
+		})),
 		jen.Id("sse").Op(":=").Qual("github.com/mark3labs/mcp-go/server", "NewSSEServer").Call(
 			jen.Id("mcpServer"),
 		),
@@ -502,13 +500,16 @@ func generateMCPServerWithJennifer(toolNames []string, outputPath string) error 
 
 	// StartServer関数を追加
 	f.Comment("StartServer starts the MCP server with all generated tools")
-	f.Func().Id("StartServer").Params(
-		jen.Id("ctx").Qual("context", "Context"),
-		jen.Id("name"),
-		jen.Id("version"),
-		jen.Id("addr").String(),
-		jen.List(jen.Id("opts").Op("...").Qual("github.com/mark3labs/mcp-go/server", "ServerOption")),
-	).Error().Block(funcBody...)
+	f.Func().Id("StartServer").ParamsFunc(func(g *jen.Group) {
+		g.Id("ctx").Qual("context", "Context")
+		g.Id("name")
+		g.Id("version")
+		g.Id("addr").String()
+		if hasSecuritySource {
+			g.Id("securitySource").Qual(oasClient, "SecuritySource")
+		}
+		g.List(jen.Id("opts").Op("...").Qual("github.com/mark3labs/mcp-go/server", "ServerOption"))
+	}).Error().Block(funcBody...)
 
 	// ファイルに保存
 	return f.Save(outputPath)
