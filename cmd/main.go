@@ -85,29 +85,44 @@ func main() {
 
 func setDescriptionTag(parsedSpec *ogen.Spec) {
 	// スキーマに再帰的にタグを設定する関数
-	var setSchemaRecursive func(schema *ogen.Schema, description string)
+	var setSchemaRecursive func(schema *ogen.Schema, description string, name string)
 
-	setSchemaRecursive = func(schema *ogen.Schema, description string) {
+	setSchemaRecursive = func(schema *ogen.Schema, description string, name string) {
 		if schema != nil && description != "" {
 			// 現在のスキーマにタグを設定
 			if len(schema.Common.Extensions) == 0 {
 				schema.Common.Extensions = make(jsonschema.Extensions)
 			}
-			schema.Common.Extensions["x-oapi-codegen-extra-tags"] = yaml.Node{
-				Kind: yaml.MappingNode,
-				Tag:  "!!map",
-				Content: []*yaml.Node{
-					{
-						Kind:  yaml.ScalarNode,
-						Tag:   "!!str",
-						Value: "mcpdescription",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Tag:   "!!str",
-						Value: description,
-					},
+			content := []*yaml.Node{
+				{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Value: "mcpdescription",
 				},
+				{
+					Kind:  yaml.ScalarNode,
+					Tag:   "!!str",
+					Value: description,
+				},
+			}
+			if name != "" {
+				content = append(content, []*yaml.Node{
+					{
+						Kind:  yaml.ScalarNode,
+						Tag:   "!!str",
+						Value: "json",
+					},
+					{
+						Kind:  yaml.ScalarNode,
+						Tag:   "!!str",
+						Value: name,
+					},
+				}...)
+			}
+			schema.Common.Extensions["x-oapi-codegen-extra-tags"] = yaml.Node{
+				Kind:    yaml.MappingNode,
+				Tag:     "!!map",
+				Content: content,
 			}
 		}
 
@@ -122,29 +137,29 @@ func setDescriptionTag(parsedSpec *ogen.Spec) {
 				if propDesc == "" {
 					propDesc = prop.Name
 				}
-				setSchemaRecursive(prop.Schema, propDesc)
+				setSchemaRecursive(prop.Schema, propDesc, prop.Name)
 			}
 		}
 
 		if schema.Items != nil {
 			items := schema.Items
 			if items.Item != nil {
-				setSchemaRecursive(items.Item, "")
+				setSchemaRecursive(items.Item, "", "")
 			}
 			for _, item := range items.Items {
-				setSchemaRecursive(item, "")
+				setSchemaRecursive(item, "", "")
 			}
 		}
 
 		// allOf, oneOf, anyOfを処理
 		for _, s := range schema.AllOf {
-			setSchemaRecursive(s, s.Description)
+			setSchemaRecursive(s, s.Description, "")
 		}
 		for _, s := range schema.OneOf {
-			setSchemaRecursive(s, s.Description)
+			setSchemaRecursive(s, s.Description, "")
 		}
 		for _, s := range schema.AnyOf {
-			setSchemaRecursive(s, s.Description)
+			setSchemaRecursive(s, s.Description, "")
 		}
 	}
 
@@ -152,7 +167,7 @@ func setDescriptionTag(parsedSpec *ogen.Spec) {
 	setParameter := func(parameters []*ogen.Parameter) {
 		for _, param := range parameters {
 			if param.Description != "" && param.Schema != nil {
-				setSchemaRecursive(param.Schema, param.Description)
+				setSchemaRecursive(param.Schema, param.Description, param.Name)
 			}
 		}
 	}
@@ -168,7 +183,7 @@ func setDescriptionTag(parsedSpec *ogen.Spec) {
 				if desc == "" {
 					desc = media.Schema.Summary
 				}
-				setSchemaRecursive(media.Schema, desc)
+				setSchemaRecursive(media.Schema, desc, "")
 			}
 		}
 	}
@@ -197,7 +212,7 @@ func setDescriptionTag(parsedSpec *ogen.Spec) {
 
 		// スキーマを処理
 		for _, schema := range parsedSpec.Components.Schemas {
-			setSchemaRecursive(schema, schema.Description)
+			setSchemaRecursive(schema, schema.Description, "")
 		}
 	}
 }
@@ -337,19 +352,22 @@ func generateMCPToolWithJennifer(operation *ir.Operation, outputPath string) err
 			jen.Id(reqBody).Op(ope).Qual(oasClient, operation.Request.Type.Name).Op("`json:\"requestBody\"`"),
 		)
 	}
+	inputParameter := jen.Id(input).Struct(
+		inputFields...,
+	)
 	// 関数定義
 	f.Func().Id("New"+operation.Name+"Tool").Params(
 		jen.Id("oasClient").Op("*").Qual(oasClient, "Client"),
-	).Op("*").Qual(functions, "Tool").Block(
+	).Op("*").Qual(functions, "Tool").Types(jen.Struct(
+		inputFields...,
+	)).Block(
 		jen.Return(
 			jen.Qual(functions, "NewFunctionTool").Call(
 				jen.Lit(operation.Name),
 				jen.Lit(toolDescription),
 				jen.Func().Params(
 					jen.Id("ctx").Qual("context", "Context"),
-					jen.Id(input).Struct(
-						inputFields...,
-					),
+					inputParameter,
 				).Params(
 					jen.Any(),
 					jen.Error(),
@@ -408,6 +426,11 @@ func generateMCPServer(g *gen.Generator, hasSecuritySchemes bool, outputPath str
 	for _, operation := range g.Operations() {
 		toolNames = append(toolNames, operation.Name)
 	}
+	optionFilePath := filepath.Join(serverDir, "option.go")
+	if err := generateMCPServerOptionsWithJennifer(optionFilePath); err != nil {
+		return nil
+	}
+
 	// サーバーファイルパス
 	serverFilePath := filepath.Join(serverDir, "server.go")
 	// Jenniferを使ってサーバーコードを生成
@@ -446,6 +469,14 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 	f.ImportName(toolsPath, "tools")
 
 	funcBody := []jen.Code{
+		// option
+		jen.Id("opt").Op(":=").Op("&").Id("option").Block(),
+		jen.For().Id("_").Op(",").Id("o").Op(":=").Range().Id("opts").Block(
+			jen.Id("o").CallFunc(func(g *jen.Group) {
+				g.Id("opt")
+			}),
+		),
+
 		// client initialization
 		jen.Comment("client initialization"),
 		jen.List(jen.Id("client"), jen.Id("err")).Op(":=").Qual(oasClient, "NewClient").CallFunc(func(g *jen.Group) {
@@ -453,6 +484,7 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 			if hasSecuritySource {
 				g.Id("securitySource")
 			}
+			g.Id("opt").Dot("clientOptions").Op("...")
 		}),
 		jen.If(jen.Id("err").Op("!=").Nil()).Block(
 			jen.Return(jen.Nil(), jen.Id("err")),
@@ -463,7 +495,7 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 		jen.Id("mcpServer").Op(":=").Qual(mcpServer, "NewMCPServer").Call(
 			jen.Id("name"),
 			jen.Id("version"),
-			jen.Id("opts").Op("..."),
+			jen.Id("opt").Dot("mcpServerOptions").Op("..."),
 		),
 	}
 
@@ -479,16 +511,17 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 			}
 			g.Line()
 		})),
-		jen.Id("sse").Op(":=").Qual(mcpServer, "NewSSEServer").Call(
+		jen.Id("server").Op(":=").Qual(mcpServer, "NewStreamableHTTPServer").Call(
 			jen.Id("mcpServer"),
+			jen.Id("opt").Dot("streamableOptions").Op("..."),
 		),
 		jen.Line(),
-		jen.Return(jen.Id("sse"), jen.Nil()),
+		jen.Return(jen.Id("server"), jen.Nil()),
 	)
 
-	// Added StartServer function
-	f.Comment("StartServer starts the MCP server with all generated tools")
-	f.Func().Id("StartServer").ParamsFunc(func(g *jen.Group) {
+	// Added NewServer function
+	f.Comment("NewServer MCP server with all generated tools")
+	f.Func().Id("NewServer").ParamsFunc(func(g *jen.Group) {
 		g.Id("ctx").Qual("context", "Context")
 		g.Id("name")
 		g.Id("version")
@@ -496,13 +529,98 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 		if hasSecuritySource {
 			g.Id("securitySource").Qual(oasClient, "SecuritySource")
 		}
-		g.List(jen.Id("opts").Op("...").Qual(mcpServer, "ServerOption"))
+		g.Id("opts").Op("...").Id("Option")
 	}).Call(
-		jen.Op("*").Qual(mcpServer, "SSEServer"),
+		jen.Op("*").Qual(mcpServer, "StreamableHTTPServer"),
 		jen.Error(),
 	).Block(funcBody...)
 
 	// Save to File
+	return f.Save(outputPath)
+}
+
+func generateMCPServerOptionsWithJennifer(outputPath string) error {
+	// Prepare package paths
+	outputDir := filepath.Dir(outputPath)
+	basePath := strings.TrimSuffix(outputDir, "/server")
+	modName := getModuleName()
+	// Reference to client package
+	oasClient := modName + "/" + basePath + "/client"
+	// Reference to the mcp server package
+	mcpServer := "github.com/mark3labs/mcp-go/server"
+
+	// file creation
+	f := jen.NewFile("server")
+
+	// file comment
+	f.HeaderComment("Code generated by OpenAPI MCP generator. DO NOT EDIT.")
+
+	// インポート
+	f.ImportName(mcpServer, "server")
+
+	// option 構造体
+	f.Type().Id("option").Struct(
+		jen.Id("mcpServerOptions").Op("[]").Qual(mcpServer, "ServerOption"),
+		jen.Id("streamableOptions").Op("[]").Qual(mcpServer, "StreamableHTTPOption"),
+		jen.Id("clientOptions").Op("[]").Qual(oasClient, "ClientOption"),
+	)
+
+	// Option 型
+	f.Type().Id("Option").Func().Params(
+		jen.Id("opt").Op("*").Id("option"),
+	)
+
+	// WithMCPServerOptions 関数
+	f.Comment("WithMCPServerOptions adds MCP server options")
+	f.Func().Id("WithMCPServerOptions").Params(
+		jen.Id("mcpServerOptions").Op("...").Qual(mcpServer, "ServerOption"),
+	).Id("Option").Block(
+		jen.Return(
+			jen.Func().Params(
+				jen.Id("opt").Op("*").Id("option"),
+			).Block(
+				jen.Id("opt").Dot("mcpServerOptions").Op("=").Id("append").Call(
+					jen.Id("opt").Dot("mcpServerOptions"),
+					jen.Id("mcpServerOptions").Op("..."),
+				),
+			),
+		),
+	)
+
+	// WithStreamableOptions 関数
+	f.Comment("WithStreamableOptions adds streamable HTTP options")
+	f.Func().Id("WithStreamableOptions").Params(
+		jen.Id("streamableOptions").Op("...").Qual(mcpServer, "StreamableHTTPOption"),
+	).Id("Option").Block(
+		jen.Return(
+			jen.Func().Params(
+				jen.Id("opt").Op("*").Id("option"),
+			).Block(
+				jen.Id("opt").Dot("streamableOptions").Op("=").Id("append").Call(
+					jen.Id("opt").Dot("streamableOptions"),
+					jen.Id("streamableOptions").Op("..."),
+				),
+			),
+		),
+	)
+
+	f.Comment("WithClientOptions openapi client options")
+	f.Func().Id("WithClientOptions").Params(
+		jen.Id("clientOptions").Op("...").Qual(oasClient, "ClientOption"),
+	).Id("Option").Block(
+		jen.Return(
+			jen.Func().Params(
+				jen.Id("opt").Op("*").Id("option"),
+			).Block(
+				jen.Id("opt").Dot("clientOptions").Op("=").Id("append").Call(
+					jen.Id("opt").Dot("clientOptions"),
+					jen.Id("clientOptions").Op("..."),
+				),
+			),
+		),
+	)
+
+	// ファイルに保存
 	return f.Save(outputPath)
 }
 
