@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"slices"
 	"strconv"
@@ -13,7 +14,9 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-func NewFunctionTool(name, description string, fn any) *Tool {
+type Execute[T any] func(ctx context.Context, input T) (any, error)
+
+func NewFunctionTool[T any](name, description string, fn Execute[T]) *Tool[T] {
 	fnType := reflect.TypeOf(fn)
 	if fnType.Kind() != reflect.Func {
 		panic("function tool must be a function")
@@ -21,7 +24,7 @@ func NewFunctionTool(name, description string, fn any) *Tool {
 
 	schema := generateSchemaFromFunction(fnType)
 
-	return &Tool{
+	return &Tool[T]{
 		name:        name,
 		description: description,
 		function:    fn,
@@ -29,148 +32,23 @@ func NewFunctionTool(name, description string, fn any) *Tool {
 	}
 }
 
-func (tool *Tool) Name() string {
+func (tool *Tool[T]) Name() string {
 	return tool.name
 }
 
-func (tool *Tool) Description() string {
+func (tool *Tool[T]) Description() string {
 	return tool.description
 }
 
-func (tool *Tool) SetFunction(fn Function) *Tool {
-	tool.function = fn
-	return tool
+func (t *Tool[T]) Execute(ctx context.Context, buf []byte) (any, error) {
+	var input T
+	if err := json.Unmarshal(buf, &input); err != nil {
+		return nil, fmt.Errorf("Un marshal json error: %w", err)
+	}
+	return t.function(ctx, input)
 }
 
-func (t *Tool) Execute(ctx context.Context, params map[string]any) (any, error) {
-	fnType := reflect.TypeOf(t.function)
-	fnValue := reflect.ValueOf(t.function)
-
-	// Check if the function accepts a context as the first parameter
-	hasContext := fnType.NumIn() > 0 && fnType.In(0).Implements(reflect.TypeOf((*context.Context)(nil)).Elem())
-
-	// Prepare arguments
-	args := make([]reflect.Value, fnType.NumIn())
-
-	// Set context if the function accepts it
-	argIndex := 0
-	if hasContext {
-		args[0] = reflect.ValueOf(ctx)
-		argIndex = 1
-	}
-
-	// Set parameters based on function signature
-	for i := argIndex; i < fnType.NumIn(); i++ {
-		paramType := fnType.In(i)
-
-		// If the function expects a map[string]any directly
-		if i == argIndex && paramType.Kind() == reflect.Map &&
-			paramType.Key().Kind() == reflect.String &&
-			paramType.Elem().Kind() == reflect.Interface {
-			args[i] = reflect.ValueOf(params)
-			continue
-		}
-
-		// Handle struct parameter - map params to struct fields
-		if paramType.Kind() == reflect.Struct {
-			structValue := reflect.New(paramType).Elem()
-
-			// For each field in the struct, check if we have a corresponding parameter
-			for j := 0; j < paramType.NumField(); j++ {
-				field := paramType.Field(j)
-
-				// Get the JSON tag if available
-				jsonTag := field.Tag.Get("json")
-				if jsonTag == "" {
-					jsonTag = field.Name
-				} else {
-					// Handle json tag options like `json:"name,omitempty"`
-					parts := strings.Split(jsonTag, ",")
-					jsonTag = parts[0]
-				}
-
-				// Check if we have a parameter with this name
-				if paramValue, ok := params[jsonTag]; ok {
-					// Try to set the field
-					fieldValue := structValue.Field(j)
-					if fieldValue.CanSet() {
-						// Convert the parameter value to the field type
-						convertedValue, err := convertToType(paramValue, field.Type)
-						if err != nil {
-							return nil, fmt.Errorf("failed to convert parameter %s: %w", jsonTag, err)
-						}
-
-						fieldValue.Set(reflect.ValueOf(convertedValue))
-					}
-				}
-			}
-
-			args[i] = structValue
-			continue
-		}
-
-		// For a single parameter function with a primitive type, try to use the first parameter or a parameter with the same name
-		paramName := ""
-		// Only try to access struct fields if the parameter type is a struct
-		if paramType.Kind() == reflect.Struct {
-			for j := 0; j < paramType.NumField(); j++ {
-				field := paramType.Field(j)
-				jsonTag := field.Tag.Get("json")
-				if jsonTag != "" {
-					parts := strings.Split(jsonTag, ",")
-					jsonTag = parts[0]
-					if _, ok := params[jsonTag]; ok {
-						paramName = jsonTag
-						break
-					}
-				}
-			}
-		}
-
-		if paramName == "" && len(params) > 0 {
-			// Just use the first parameter
-			for name := range params {
-				paramName = name
-				break
-			}
-		}
-
-		if paramName != "" {
-			if paramValue, ok := params[paramName]; ok {
-				// Try to convert the parameter value to the expected type
-				convertedValue, err := convertToType(paramValue, paramType)
-				if err != nil {
-					return nil, fmt.Errorf("failed to convert parameter %s: %w", paramName, err)
-				}
-
-				args[i] = reflect.ValueOf(convertedValue)
-				continue
-			}
-		}
-
-		// If we couldn't find a parameter, use the zero value for the type
-		args[i] = reflect.Zero(paramType)
-	}
-
-	// Call the function
-	results := fnValue.Call(args)
-
-	// Handle return values
-	if len(results) == 0 {
-		return nil, nil
-	} else if len(results) == 1 {
-		return results[0].Interface(), nil
-	} else {
-		// Assume the last result is an error
-		errVal := results[len(results)-1]
-		if errVal.IsNil() {
-			return results[0].Interface(), nil
-		}
-		return results[0].Interface(), errVal.Interface().(error)
-	}
-}
-
-func (tool *Tool) ServerTool() server.ServerTool {
+func (tool *Tool[T]) ServerTool() server.ServerTool {
 	t := mcp.Tool{
 		Name:        tool.name,
 		Description: tool.description,
@@ -182,22 +60,24 @@ func (tool *Tool) ServerTool() server.ServerTool {
 	return server.ServerTool{
 		Tool: t,
 		Handler: func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			params := map[string]any{}
+			var buf []byte
 			if req.Params.Arguments != nil {
-				buf, err := json.Marshal(&req.Params.Arguments)
+				var err error
+				buf, err = json.Marshal(&req.Params.Arguments)
 				if err != nil {
 					return mcp.NewToolResultError(err.Error()), nil
 				}
-				if err := json.Unmarshal(buf, &params); err != nil {
-					return mcp.NewToolResultError(err.Error()), nil
-				}
+			} else {
+				buf = []byte("{}")
 			}
-			res, err := tool.Execute(ctx, params)
+			res, err := tool.Execute(ctx, buf)
 			if err != nil {
+				slog.ErrorContext(ctx, "failed mcp tools", slog.String("error", err.Error()))
 				return mcp.NewToolResultError(err.Error()), nil
 			}
-			buf, err := json.Marshal(res)
+			buf, err = json.Marshal(res)
 			if err != nil {
+				slog.ErrorContext(ctx, "failed mcp tools response json parse", slog.String("error", err.Error()))
 				return mcp.NewToolResultError(err.Error()), nil
 			}
 			return mcp.NewToolResultText(string(buf)), nil
@@ -387,7 +267,7 @@ func getTypeSchema(t reflect.Type) map[string]any {
 			fieldSchema := getTypeSchema(field.Type)
 
 			// Add description from doc tag if available
-			if docTag := field.Tag.Get("doc"); docTag != "" {
+			if docTag := field.Tag.Get("mcpdescription"); docTag != "" {
 				fieldSchema["description"] = docTag
 			}
 

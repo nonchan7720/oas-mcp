@@ -10,15 +10,15 @@ import (
 type MCPTool interface {
 	Name() string
 	Description() string
-	Execute(ctx context.Context, params map[string]any) (any, error)
+	Execute(ctx context.Context, buf []byte) (any, error)
 }
 
 type Function func(ctx context.Context, params any) (any, error)
 
-type Tool struct {
+type Tool[T any] struct {
 	name        string
 	description string
-	function    any
+	function    Execute[T]
 	schema      *Schema
 }
 
@@ -37,6 +37,6 @@ func (s *Schema) MCPTool() mcp.ToolInputSchema {
 }
 
 var (
-	_           MCPTool = (*Tool)(nil)
+	_           MCPTool = (*Tool[any])(nil)
 	ErrRequired         = errors.New("Required.")
 )
