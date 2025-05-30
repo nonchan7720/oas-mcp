@@ -251,11 +251,11 @@ func generateClient(spec *ogen.Spec, basePath, packageName string) (*gen.Generat
 		}
 	}
 
-	fs := genfs.FormattedSource{
-		// FIXME(tdakkota): write source uses imports.Process which also uses go/format.
-		// 	So, there is no reason to format source twice or provide a flag to disable formatting.
-		Format: false,
-		Root:   absOutputPath,
+	fs := Source{
+		FormattedSource: genfs.FormattedSource{
+			Format: true,
+			Root:   absOutputPath,
+		},
 	}
 	if err := g.WriteSource(fs, packageName); err != nil {
 		return nil, fmt.Errorf("failed write: %w", err)
