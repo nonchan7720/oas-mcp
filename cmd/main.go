@@ -11,12 +11,8 @@ import (
 	"strings"
 
 	"github.com/dave/jennifer/jen"
-	"github.com/go-faster/yaml"
-	"github.com/ogen-go/ogen"
-	"github.com/ogen-go/ogen/gen"
-	"github.com/ogen-go/ogen/gen/genfs"
-	"github.com/ogen-go/ogen/gen/ir"
-	"github.com/ogen-go/ogen/jsonschema"
+	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/oapi-codegen/oapi-codegen/v2/pkg/codegen"
 )
 
 //go:generate go run main.go -path=../../api/openapi.yaml -output=../../pkg/client
@@ -24,7 +20,7 @@ import (
 func main() {
 	/*
 		- 引数に openapi のファイルパスをもらう
-		- github.com/ogen-go/ogen を使って openapi client を生成する
+		- github.com/getkin/kin-openapi と github.com/oapi-codegen/oapi-codegen/v2 を使って openapi client を生成する
 		- 生成した openapi client を利用して mcp server を作る
 			- github.com/mark3labs/mcp-go を使ってMCP serverを作成
 			- sse を使う
@@ -47,149 +43,128 @@ func main() {
 		log.Fatal("OpenAPI specification file path is required")
 	}
 
+	loader := openapi3.NewLoader()
+	loader.IsExternalRefsAllowed = true
 	// OpenAPIファイルを読み込む
-	spec, err := os.ReadFile(openapiPath)
+	o3, err := loader.LoadFromFile(openapiPath)
 	if err != nil {
 		log.Fatalf("Failed to read OpenAPI spec: %v", err)
 	}
 
-	// OpenAPIパーサーでパース
-	parsedSpec, err := ogen.Parse(spec)
-	if err != nil {
-		log.Fatalf("Failed to parse OpenAPI spec: %v", err)
-	}
-	setDescriptionTag(parsedSpec)
+	setDescriptionTagOpenAPI(o3)
+
 	// 出力ディレクトリを作成
 	if err := os.MkdirAll(outputPath, 0755); err != nil {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
-
-	// ogen を使ってクライアントコードを生成
-	g, err := generateClient(parsedSpec, outputPath, packageName)
+	err = generateClientByCodeGen(o3, outputPath, packageName)
 	if err != nil {
 		log.Fatalf("Failed to generate client: %v", err)
 	}
 
 	// MCP Tools を生成
-	if err := generateMCPTools(g, outputPath); err != nil {
+	if err := generateMCPTools(o3, outputPath); err != nil {
 		log.Fatalf("Failed to generate MCP tools: %v", err)
 	}
-	hasSecuritySource := len(parsedSpec.Security) > 0 || len(parsedSpec.Components.SecuritySchemes) > 0
+	// hasSecuritySource := len(o3.Security) > 0 || len(o3.Components.SecuritySchemes) > 0
 	// MCP Server ファイルを生成
-	if err := generateMCPServer(g, hasSecuritySource, outputPath); err != nil {
+	if err := generateMCPServer(o3, outputPath); err != nil {
 		log.Fatalf("Failed to generate MCP server: %v", err)
 	}
 
 	log.Printf("Successfully generated OpenAPI client, MCP tools and server in %s", outputPath)
 }
 
-func setDescriptionTag(parsedSpec *ogen.Spec) {
+func setDescriptionTagOpenAPI(parsedSpec *openapi3.T) {
 	// スキーマに再帰的にタグを設定する関数
-	var setSchemaRecursive func(schema *ogen.Schema, description string, name string)
+	var setSchemaRecursive func(schema *openapi3.Schema, description string, name string)
 
-	setSchemaRecursive = func(schema *ogen.Schema, description string, name string) {
+	setSchemaRecursive = func(schema *openapi3.Schema, description string, name string) {
 		if schema != nil && description != "" {
 			// 現在のスキーマにタグを設定
-			if len(schema.Common.Extensions) == 0 {
-				schema.Common.Extensions = make(jsonschema.Extensions)
+			if len(schema.Extensions) == 0 {
+				schema.Extensions = make(map[string]any)
 			}
-			content := []*yaml.Node{
-				{
-					Kind:  yaml.ScalarNode,
-					Tag:   "!!str",
-					Value: "mcpdescription",
-				},
-				{
-					Kind:  yaml.ScalarNode,
-					Tag:   "!!str",
-					Value: description,
-				},
+			content := map[string]any{
+				"mcpdescription": strings.ReplaceAll(description, "`", ""),
 			}
-			if name != "" {
-				content = append(content, []*yaml.Node{
-					{
-						Kind:  yaml.ScalarNode,
-						Tag:   "!!str",
-						Value: "json",
-					},
-					{
-						Kind:  yaml.ScalarNode,
-						Tag:   "!!str",
-						Value: name,
-					},
-				}...)
-			}
-			schema.Common.Extensions["x-oapi-codegen-extra-tags"] = yaml.Node{
-				Kind:    yaml.MappingNode,
-				Tag:     "!!map",
-				Content: content,
-			}
+			schema.Extensions["x-oapi-codegen-extra-tags"] = content
 		}
 
 		// オブジェクトの場合、各プロパティを処理
-		for _, prop := range schema.Properties {
+		for name, prop := range schema.Properties {
 			// propertyからスキーマを取得
-			if prop.Schema != nil {
-				propDesc := prop.Schema.Description
-				if propDesc == "" {
-					propDesc = prop.Schema.Summary
-				}
-				if propDesc == "" {
-					propDesc = prop.Name
-				}
-				setSchemaRecursive(prop.Schema, propDesc, prop.Name)
+			if prop.Value != nil {
+				propDesc := prop.Value.Description
+				setSchemaRecursive(prop.Value, propDesc, name)
 			}
 		}
 
 		if schema.Items != nil {
 			items := schema.Items
-			if items.Item != nil {
-				setSchemaRecursive(items.Item, "", "")
-			}
-			for _, item := range items.Items {
-				setSchemaRecursive(item, "", "")
+			if items.Value != nil {
+				setSchemaRecursive(items.Value, "", "")
 			}
 		}
 
 		// allOf, oneOf, anyOfを処理
 		for _, s := range schema.AllOf {
-			setSchemaRecursive(s, s.Description, "")
+			setSchemaRecursive(s.Value, s.Value.Description, "")
 		}
 		for _, s := range schema.OneOf {
-			setSchemaRecursive(s, s.Description, "")
+			setSchemaRecursive(s.Value, s.Value.Description, "")
 		}
 		for _, s := range schema.AnyOf {
-			setSchemaRecursive(s, s.Description, "")
+			setSchemaRecursive(s.Value, s.Value.Description, "")
 		}
 	}
 
 	// パラメータを処理
-	setParameter := func(parameters []*ogen.Parameter) {
-		for _, param := range parameters {
+	setParameter := func(parameters []*openapi3.ParameterRef) {
+		for _, ref := range parameters {
+			param := ref.Value
 			if param.Description != "" && param.Schema != nil {
-				setSchemaRecursive(param.Schema, param.Description, param.Name)
+				setSchemaRecursive(param.Schema.Value, param.Description, param.Name)
+				if param.Description != "" {
+					// 現在のスキーマにタグを設定
+					if len(param.Extensions) == 0 {
+						param.Extensions = make(map[string]any)
+					}
+					content := map[string]any{
+						"mcpdescription": strings.ReplaceAll(param.Description, "`", ""),
+					}
+					param.Extensions["x-oapi-codegen-extra-tags"] = content
+				}
 			}
 		}
 	}
 
 	// リクエストボディを処理
-	setRequestBody := func(body *ogen.RequestBody) {
-		if body == nil {
+	setRequestBody := func(ref *openapi3.RequestBodyRef) {
+		if ref == nil || ref.Value == nil {
 			return
 		}
+		body := ref.Value
+		desc := body.Description
 		for _, media := range body.Content {
-			if media.Schema != nil && (media.Schema.Description != "" || media.Schema.Summary != "") {
-				desc := media.Schema.Description
-				if desc == "" {
-					desc = media.Schema.Summary
+			if media.Schema != nil && desc != "" {
+				setSchemaRecursive(media.Schema.Value, desc, "")
+				if desc != "" {
+					// 現在のスキーマにタグを設定
+					if len(media.Extensions) == 0 {
+						media.Extensions = make(map[string]any)
+					}
+					content := map[string]any{
+						"mcpdescription": strings.ReplaceAll(desc, "`", ""),
+					}
+					media.Extensions["x-oapi-codegen-extra-tags"] = content
 				}
-				setSchemaRecursive(media.Schema, desc, "")
 			}
 		}
 	}
 
 	// パスと操作を処理
-	for _, pathItem := range parsedSpec.Paths {
+	for _, pathItem := range parsedSpec.Paths.Map() {
 		for _, ope := range getOperations(pathItem) {
 			setParameter(ope.Parameters)
 			setRequestBody(ope.RequestBody)
@@ -199,7 +174,7 @@ func setDescriptionTag(parsedSpec *ogen.Spec) {
 	// コンポーネントを処理
 	if parsedSpec.Components != nil {
 		// パラメータを処理
-		parameters := make([]*ogen.Parameter, 0, len(parsedSpec.Components.Parameters))
+		parameters := make([]*openapi3.ParameterRef, 0, len(parsedSpec.Components.Parameters))
 		for _, parameter := range parsedSpec.Components.Parameters {
 			parameters = append(parameters, parameter)
 		}
@@ -211,60 +186,48 @@ func setDescriptionTag(parsedSpec *ogen.Spec) {
 		}
 
 		// スキーマを処理
-		for _, schema := range parsedSpec.Components.Schemas {
-			setSchemaRecursive(schema, schema.Description, "")
+		for name, schema := range parsedSpec.Components.Schemas {
+			setSchemaRecursive(schema.Value, schema.Value.Description, name)
 		}
 	}
 }
 
-// OpenAPI仕様からogenクライアントを生成
-func generateClient(spec *ogen.Spec, basePath, packageName string) (*gen.Generator, error) {
+func generateClientByCodeGen(parsedSpec *openapi3.T, basePath, packageName string) error {
 	outputPath := path.Join(basePath, "client")
 	// 中間ステップを省略して、オリジナルのYAMLファイルを直接使用
 	// 出力ディレクトリを絶対パスに変換
 	absOutputPath, err := filepath.Abs(outputPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get absolute path: %w", err)
-	}
-	g, err := gen.NewGenerator(spec, gen.Options{
-		Generator: gen.GenerateOptions{
-			Features: &gen.FeatureOptions{
-				Enable: gen.FeatureSet{
-					"paths/client": struct{}{},
-					"ogen/otel":    struct{}{},
-				},
-				DisableAll: true,
-			},
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("build IR: %w", err)
+		return err
 	}
 	switch files, err := os.ReadDir(absOutputPath); {
 	case os.IsNotExist(err):
 		if err := os.MkdirAll(absOutputPath, 0o750); err != nil {
-			return nil, err
+			return err
 		}
 	default:
 		if err := cleanDir(absOutputPath, files); err != nil {
-			return nil, fmt.Errorf("failed cleanDir: %w", err)
+			return fmt.Errorf("failed cleanDir: %w", err)
 		}
 	}
 
-	fs := Source{
-		FormattedSource: genfs.FormattedSource{
-			Format: true,
-			Root:   absOutputPath,
+	code, err := codegen.Generate(parsedSpec, codegen.Configuration{
+		PackageName: packageName,
+		Generate: codegen.GenerateOptions{
+			Client:       true,
+			Models:       true,
+			EmbeddedSpec: true,
 		},
+	})
+	if err != nil {
+		return err
 	}
-	if err := g.WriteSource(fs, packageName); err != nil {
-		return nil, fmt.Errorf("failed write: %w", err)
-	}
-	return g, nil
+
+	return os.WriteFile(filepath.Join(absOutputPath, "client.gen.go"), []byte(code), 0o644)
 }
 
 // MCP Toolsを生成
-func generateMCPTools(g *gen.Generator, outputPath string) error {
+func generateMCPTools(o3 *openapi3.T, outputPath string) error {
 	// 各エンドポイントに対応するMCP Toolを生成
 	toolsDir := filepath.Join(outputPath, "tools")
 
@@ -272,10 +235,13 @@ func generateMCPTools(g *gen.Generator, outputPath string) error {
 	if err := os.MkdirAll(toolsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create tools directory: %w", err)
 	}
-
-	for _, operation := range g.Operations() {
+	operationDefines, err := codegen.OperationDefinitions(o3, false)
+	if err != nil {
+		return err
+	}
+	for _, operation := range operationDefines {
 		// MCPツールファイルを生成
-		toolFilename := strings.ToLower(operation.Spec.OperationID) + "_tool.go"
+		toolFilename := strings.ToLower(operation.OperationId) + "_tool.go"
 		toolFilePath := filepath.Join(toolsDir, toolFilename)
 
 		// Jenniferを使ってコードを生成
@@ -283,136 +249,138 @@ func generateMCPTools(g *gen.Generator, outputPath string) error {
 			operation,
 			toolFilePath,
 		); err != nil {
-			return fmt.Errorf("failed to generate tool for %s: %w", operation.Name, err)
+			return fmt.Errorf("failed to generate tool for %s: %w", operation.OperationId, err)
 		}
 	}
-
 	return nil
 }
 
 // Jenniferを使用してMCPツールコードを生成
-func generateMCPToolWithJennifer(operation *ir.Operation, outputPath string) error {
-	// パッケージパスを準備
+func generateMCPToolWithJennifer(operation codegen.OperationDefinition, outputPath string) error {
+	modName := getModuleName()
 	outputDir := filepath.Dir(outputPath)
 	basePath := strings.TrimSuffix(outputDir, "/tools")
-	modName := getModuleName()
-	// クライアントパッケージへの参照
 	oasClient := modName + "/" + basePath + "/client"
 	// function
 	functions := "github.com/nonchan7720/oas-mcp/functions"
 
-	toolDescription := ""
-	switch {
-	case operation.Description != "":
-		toolDescription = operation.Description
-	case operation.Summary != "":
+	toolDescription := operation.Spec.Description
+	if toolDescription == "" {
 		toolDescription = operation.Summary
-	case operation.Spec.Summary != "":
-		toolDescription = operation.Spec.Summary
 	}
 
-	// ファイル作成
+	inputStructName := operation.OperationId + "Input"
 	f := jen.NewFile("tools")
-
-	// ファイルコメント
 	f.HeaderComment("Code generated by OpenAPI MCP generator. DO NOT EDIT.")
-
-	// インポート
 	f.ImportName("context", "context")
 	f.ImportName("encoding/json", "json")
 	f.ImportName(functions, "functions")
 	f.ImportName(oasClient, "client")
 
-	// 関数コメント
-	f.Comment(fmt.Sprintf("%s is a MCP tool for %s", operation.Spec.OperationID, toolDescription))
-	// パスパラメータ、クエリパラメータ、リクエストボディの処理
-	hasPathParams := len(operation.PathParams()) > 0
-	hasQueryParams := len(operation.QueryParams()) > 0
-	hasParams := hasPathParams || hasQueryParams
-	hasRequestBody := operation.Request != nil
-	const (
-		reqParams = "RequestParameter"
-		reqBody   = "RequestBody"
-		input     = "input"
-	)
+	args := []jen.Code{jen.Id("ctx")}
 	inputFields := []jen.Code{}
-	if hasParams {
-		inputFields = append(inputFields,
-			jen.Id(reqParams).Qual(oasClient, operation.Name+"Params").Op(
-				fmt.Sprintf("`json:\"requestParameter\" mcpdescription:\"%s\"`", operation.Description),
-			),
-		)
-	}
-	if hasRequestBody {
-		ope := ""
-		if operation.Request.DoTakePtr() {
-			ope = "*"
+	for _, param := range operation.PathParams {
+		tag := map[string]string{
+			"json": param.GoName(),
 		}
-		inputFields = append(inputFields,
-			jen.Id(reqBody).Op(ope).Qual(oasClient, operation.Request.Type.Name).Op("`json:\"requestBody\"`"),
-		)
+		desc := param.Schema.Description
+		if param.Spec != nil && param.Spec.Description != "" {
+			desc = param.Spec.Description
+		}
+		tag["mcpdescription"] = desc
+		if param.Schema.GoType == param.GoName() {
+			inputFields = append(inputFields,
+				jen.Id(param.GoName()).Qual(oasClient, param.GoName()).Tag(tag),
+			)
+			args = append(args, jen.Id("input").Dot(param.GoName()))
+		} else {
+			inputFields = append(inputFields,
+				jen.Id(param.GoName()).Op(param.Schema.GoType).Tag(tag),
+			)
+			args = append(args, jen.Id("input").Dot(param.GoName()))
+		}
 	}
-	inputParameter := jen.Id(input).Struct(
-		inputFields...,
-	)
-	// 関数定義
-	f.Func().Id("New"+operation.Name+"Tool").Params(
-		jen.Id("oasClient").Op("*").Qual(oasClient, "Client"),
-	).Op("*").Qual(functions, "Tool").Types(jen.Struct(
-		inputFields...,
-	)).Block(
+	for _, body := range operation.Bodies {
+		typeDef := body.TypeDef(operation.OperationId)
+		tag := map[string]string{
+			"json": body.Schema.RefType,
+		}
+		desc := ""
+		if schema := body.Schema.OAPISchema; schema != nil {
+			if extensions := schema.Extensions; extensions != nil {
+				if tags, ok := extensions["x-oapi-codegen-extra-tags"].(map[string]any); ok {
+					desc, _ = tags["mcpdescription"].(string)
+				}
+			}
+		}
+		tag["mcpdescription"] = desc
+		inputFields = append(inputFields,
+			jen.Id(typeDef.TypeName).Qual(oasClient, typeDef.TypeName).Tag(tag),
+		)
+		args = append(args, jen.Id("input").Dot(typeDef.TypeName))
+	}
+	if len(operation.Bodies) == 0 {
+		for _, typeDef := range operation.TypeDefinitions {
+			tag := map[string]string{
+				"json": typeDef.TypeName,
+			}
+			desc := ""
+			if schema := typeDef.Schema.OAPISchema; schema != nil {
+				if extensions := schema.Extensions; extensions != nil {
+					if tags, ok := extensions["x-oapi-codegen-extra-tags"].(map[string]any); ok {
+						desc, _ = tags["mcpdescription"].(string)
+					}
+				}
+			}
+			tag["mcpdescription"] = desc
+			inputFields = append(inputFields,
+				jen.Id(typeDef.TypeName).Op("*").Qual(oasClient, typeDef.TypeName).Tag(tag),
+			)
+			args = append(args, jen.Id("input").Dot(typeDef.TypeName))
+		}
+	}
+	if len(inputFields) == 0 {
+		inputFields = append(inputFields, jen.Comment("// No parameters"))
+	}
+	f.Type().Id(inputStructName).Struct(inputFields...)
+	for _, resp := range operation.Responses {
+		fmt.Println(resp.StatusCode)
+	}
+	f.Comment(fmt.Sprintf("%s is a MCP tool for %s", operation.OperationId, toolDescription))
+	f.Func().Id("New"+operation.OperationId+"Tool").Params(
+		jen.Id("oasClient").Op("*").Qual(oasClient, "ClientWithResponses"),
+	).Op("*").Qual(functions, "Tool").Types(jen.Id(inputStructName)).Block(
 		jen.Return(
-			jen.Qual(functions, "NewFunctionTool").Call(
-				jen.Lit(operation.Name),
+			jen.Qual(functions, "NewFunctionTool").Types(jen.Id(inputStructName)).Call(
+				jen.Lit(operation.OperationId),
 				jen.Lit(toolDescription),
 				jen.Func().Params(
 					jen.Id("ctx").Qual("context", "Context"),
-					inputParameter,
-				).Params(
-					jen.Any(),
-					jen.Error(),
-				).BlockFunc(func(g *jen.Group) {
-					g.Line()
-					requestArgs := []jen.Code{
-						jen.Id("ctx"),
-					}
-					if hasRequestBody {
-						requestArgs = append(requestArgs, jen.Id(input).Dot(reqBody))
-					}
-					if hasParams {
-						requestArgs = append(requestArgs, jen.Id(input).Dot(reqParams))
-					}
-					// クライアントを呼び出す（リクエストボディ + パラメータ）
-					g.Line()
-					g.Comment("クライアントを使用してAPIを呼び出し")
-					g.List(jen.Id("resp"), jen.Id("err")).Op(":=").Id("oasClient").Dot(operation.Name).Call(
-						requestArgs...,
-					)
-
+					jen.Id("input").Id(inputStructName),
+				).Params(jen.Any(), jen.Error()).BlockFunc(func(g *jen.Group) {
+					g.List(jen.Id("resp"), jen.Id("err")).Op(":=").Id("oasClient").Dot(operation.OperationId + "WithResponse").Call(args...)
 					g.If(jen.Id("err").Op("!=").Nil()).Block(
-						jen.Return(jen.Lit(""), jen.Id("err")),
+						jen.Return(jen.Nil(), jen.Id("err")),
 					)
-					g.Line()
-
-					// レスポンスをJSON文字列に変換
-					g.Comment("レスポンスをJSON文字列に変換")
-					g.List(jen.Id("resultBytes"), jen.Id("err")).Op(":=").Qual("encoding/json", "Marshal").Call(jen.Id("resp"))
-					g.If(jen.Id("err").Op("!=").Nil()).Block(
-						jen.Return(jen.Lit(""), jen.Id("err")),
-					)
-					g.Line()
-					g.Return(jen.String().Call(jen.Id("resultBytes")), jen.Nil())
+					for _, resp := range operation.Responses {
+						if resp.StatusCode != "204" {
+							body := fmt.Sprintf("JSON%s", resp.StatusCode)
+							g.If(jen.Id("resp").Dot(body).Op("!=").Nil()).Block(
+								jen.Return(jen.Id("resp").Dot(body), jen.Nil()),
+							)
+						}
+					}
+					g.Return(jen.Op("[]byte(`{\"status\":\"OK\"}`)"), jen.Nil())
 				}),
 			),
 		),
 	)
 
-	// ファイルに保存
 	return f.Save(outputPath)
 }
 
 // MCP Serverを生成
-func generateMCPServer(g *gen.Generator, hasSecuritySchemes bool, outputPath string) error {
+func generateMCPServer(o3 *openapi3.T, outputPath string) error {
 	// サーバーディレクトリ
 	serverDir := filepath.Join(outputPath, "server")
 
@@ -423,8 +391,10 @@ func generateMCPServer(g *gen.Generator, hasSecuritySchemes bool, outputPath str
 
 	// ツール名を収集
 	var toolNames []string
-	for _, operation := range g.Operations() {
-		toolNames = append(toolNames, operation.Name)
+	for _, pathItem := range o3.Paths.Map() {
+		for _, ope := range getOperations(pathItem) {
+			toolNames = append(toolNames, ope.OperationID)
+		}
 	}
 	optionFilePath := filepath.Join(serverDir, "option.go")
 	if err := generateMCPServerOptionsWithJennifer(optionFilePath); err != nil {
@@ -434,11 +404,11 @@ func generateMCPServer(g *gen.Generator, hasSecuritySchemes bool, outputPath str
 	// サーバーファイルパス
 	serverFilePath := filepath.Join(serverDir, "server.go")
 	// Jenniferを使ってサーバーコードを生成
-	return generateMCPServerWithJennifer(hasSecuritySchemes, toolNames, serverFilePath)
+	return generateMCPServerWithJennifer(toolNames, serverFilePath)
 }
 
 // Jenniferを使用してMCPサーバーコードを生成
-func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, outputPath string) error {
+func generateMCPServerWithJennifer(toolNames []string, outputPath string) error {
 	// Prepare package paths
 	outputDir := filepath.Dir(outputPath)
 	basePath := strings.TrimSuffix(outputDir, "/server")
@@ -479,11 +449,8 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 
 		// client initialization
 		jen.Comment("client initialization"),
-		jen.List(jen.Id("client"), jen.Id("err")).Op(":=").Qual(oasClient, "NewClient").CallFunc(func(g *jen.Group) {
+		jen.List(jen.Id("client"), jen.Id("err")).Op(":=").Qual(oasClient, "NewClientWithResponses").CallFunc(func(g *jen.Group) {
 			g.Id("apiServerURL")
-			if hasSecuritySource {
-				g.Id("securitySource")
-			}
 			g.Id("opt").Dot("clientOptions").Op("...")
 		}),
 		jen.If(jen.Id("err").Op("!=").Nil()).Block(
@@ -526,9 +493,6 @@ func generateMCPServerWithJennifer(hasSecuritySource bool, toolNames []string, o
 		g.Id("name")
 		g.Id("version")
 		g.Id("apiServerURL").String()
-		if hasSecuritySource {
-			g.Id("securitySource").Qual(oasClient, "SecuritySource")
-		}
 		g.Id("opts").Op("...").Id("Option")
 	}).Call(
 		jen.Op("*").Qual(mcpServer, "StreamableHTTPServer"),
@@ -625,8 +589,8 @@ func generateMCPServerOptionsWithJennifer(outputPath string) error {
 }
 
 // Helper function to retrieve an operation from a PathItem
-func getOperations(pathItem *ogen.PathItem) map[string]*ogen.Operation {
-	operations := make(map[string]*ogen.Operation)
+func getOperations(pathItem *openapi3.PathItem) map[string]*openapi3.Operation {
+	operations := make(map[string]*openapi3.Operation)
 
 	if pathItem.Get != nil {
 		operations["get"] = pathItem.Get
@@ -689,7 +653,6 @@ func getModuleName() string {
 		dir = parent
 	}
 
-	log.Printf("go.mod not found")
 	return ""
 }
 
@@ -712,4 +675,17 @@ func cleanDir(targetDir string, files []os.DirEntry) (rerr error) {
 		}
 	}
 	return rerr
+}
+
+// ユーティリティ: スネーク/キャメル→パスカルケース
+func toGoFieldName(s string) string {
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == '_' || r == '-'
+	})
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, "")
 }
