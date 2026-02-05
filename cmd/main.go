@@ -215,7 +215,7 @@ func generateClientByCodeGen(parsedSpec *openapi3.T, basePath, packageName strin
 			return err
 		}
 	case err != nil:
-		return fmt.Errorf("failed to read directory: %w", err)
+		return fmt.Errorf("failed to read directory %s: %w", absOutputPath, err)
 	default:
 		if err := cleanDir(absOutputPath, files); err != nil {
 			return fmt.Errorf("failed cleanDir: %w", err)
