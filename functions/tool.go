@@ -308,8 +308,12 @@ func convertToType(value any, targetType reflect.Type) (any, error) {
 		switch v := value.(type) {
 		case bool:
 			return v, nil
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		case int, int8, int16, int32, int64:
 			return reflect.ValueOf(v).Int() != 0, nil
+		case uint, uint8, uint16, uint32, uint64:
+			return reflect.ValueOf(v).Uint() != 0, nil
+		case float32, float64:
+			return reflect.ValueOf(v).Float() != 0, nil
 		case string:
 			b, err := strconv.ParseBool(v)
 			if err != nil {
@@ -323,9 +327,12 @@ func convertToType(value any, targetType reflect.Type) (any, error) {
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		// Try to convert to int
 		switch v := value.(type) {
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		case int, int8, int16, int32, int64:
 			intVal := reflect.ValueOf(v).Int()
 			return reflect.ValueOf(intVal).Convert(targetType).Interface(), nil
+		case uint, uint8, uint16, uint32, uint64:
+			uintVal := reflect.ValueOf(v).Uint()
+			return reflect.ValueOf(int64(uintVal)).Convert(targetType).Interface(), nil
 		case float32, float64:
 			floatVal := reflect.ValueOf(v).Float()
 			return reflect.ValueOf(int64(floatVal)).Convert(targetType).Interface(), nil
@@ -342,9 +349,12 @@ func convertToType(value any, targetType reflect.Type) (any, error) {
 	case reflect.Float32, reflect.Float64:
 		// Try to convert to float
 		switch v := value.(type) {
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
+		case int, int8, int16, int32, int64:
 			intVal := reflect.ValueOf(v).Int()
 			return reflect.ValueOf(float64(intVal)).Convert(targetType).Interface(), nil
+		case uint, uint8, uint16, uint32, uint64:
+			uintVal := reflect.ValueOf(v).Uint()
+			return reflect.ValueOf(float64(uintVal)).Convert(targetType).Interface(), nil
 		case float32, float64:
 			floatVal := reflect.ValueOf(v).Float()
 			return reflect.ValueOf(floatVal).Convert(targetType).Interface(), nil

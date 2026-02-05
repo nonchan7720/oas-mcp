@@ -2,7 +2,6 @@ package functions
 
 import (
 	"context"
-	"errors"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -36,7 +35,4 @@ func (s *Schema) MCPTool() mcp.ToolInputSchema {
 	}
 }
 
-var (
-	_           MCPTool = (*Tool[any])(nil)
-	ErrRequired         = errors.New("Required.")
-)
+var _ MCPTool = (*Tool[any])(nil)

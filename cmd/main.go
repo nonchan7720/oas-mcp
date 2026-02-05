@@ -80,7 +80,10 @@ func setDescriptionTagOpenAPI(parsedSpec *openapi3.T) {
 	var setSchemaRecursive func(schema *openapi3.Schema, description string, name string)
 
 	setSchemaRecursive = func(schema *openapi3.Schema, description string, name string) {
-		if schema != nil && description != "" {
+		if schema == nil {
+			return
+		}
+		if description != "" {
 			// 現在のスキーマにタグを設定
 			if len(schema.Extensions) == 0 {
 				schema.Extensions = make(map[string]any)
@@ -109,13 +112,19 @@ func setDescriptionTagOpenAPI(parsedSpec *openapi3.T) {
 
 		// allOf, oneOf, anyOfを処理
 		for _, s := range schema.AllOf {
-			setSchemaRecursive(s.Value, s.Value.Description, "")
+			if s.Value != nil {
+				setSchemaRecursive(s.Value, s.Value.Description, "")
+			}
 		}
 		for _, s := range schema.OneOf {
-			setSchemaRecursive(s.Value, s.Value.Description, "")
+			if s.Value != nil {
+				setSchemaRecursive(s.Value, s.Value.Description, "")
+			}
 		}
 		for _, s := range schema.AnyOf {
-			setSchemaRecursive(s.Value, s.Value.Description, "")
+			if s.Value != nil {
+				setSchemaRecursive(s.Value, s.Value.Description, "")
+			}
 		}
 	}
 
@@ -205,6 +214,8 @@ func generateClientByCodeGen(parsedSpec *openapi3.T, basePath, packageName strin
 		if err := os.MkdirAll(absOutputPath, 0o750); err != nil {
 			return err
 		}
+	case err != nil:
+		return fmt.Errorf("failed to read directory: %w", err)
 	default:
 		if err := cleanDir(absOutputPath, files); err != nil {
 			return fmt.Errorf("failed cleanDir: %w", err)
@@ -343,9 +354,6 @@ func generateMCPToolWithJennifer(operation codegen.OperationDefinition, outputPa
 		inputFields = append(inputFields, jen.Comment("// No parameters"))
 	}
 	f.Type().Id(inputStructName).Struct(inputFields...)
-	for _, resp := range operation.Responses {
-		fmt.Println(resp.StatusCode)
-	}
 	f.Comment(fmt.Sprintf("%s is a MCP tool for %s", operation.OperationId, toolDescription))
 	f.Func().Id("New"+operation.OperationId+"Tool").Params(
 		jen.Id("oasClient").Op("*").Qual(oasClient, "ClientWithResponses"),
@@ -398,7 +406,7 @@ func generateMCPServer(o3 *openapi3.T, outputPath string) error {
 	}
 	optionFilePath := filepath.Join(serverDir, "option.go")
 	if err := generateMCPServerOptionsWithJennifer(optionFilePath); err != nil {
-		return nil
+		return err
 	}
 
 	// サーバーファイルパス
@@ -675,17 +683,4 @@ func cleanDir(targetDir string, files []os.DirEntry) (rerr error) {
 		}
 	}
 	return rerr
-}
-
-// ユーティリティ: スネーク/キャメル→パスカルケース
-func toGoFieldName(s string) string {
-	parts := strings.FieldsFunc(s, func(r rune) bool {
-		return r == '_' || r == '-'
-	})
-	for i, p := range parts {
-		if len(p) > 0 {
-			parts[i] = strings.ToUpper(p[:1]) + p[1:]
-		}
-	}
-	return strings.Join(parts, "")
 }
