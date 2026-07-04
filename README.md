@@ -34,9 +34,15 @@ go mod download
 # OpenAPI仕様からクライアントコードを生成
 go run cmd/main.go -path=./api/openapi.yaml -output=./pkg/client
 
+# Xquikの公開OpenAPI 3.1 JSONからクライアントコードを生成
+curl -fsSL https://xquik.com/openapi.json -o /tmp/xquik-openapi.json
+go run cmd/main.go -path=/tmp/xquik-openapi.json -output=./pkg/xquikclient
+
 # または、go:generateを使用
 go generate ./...
 ```
+
+Xquikの仕様は`x-api-key`ヘッダーとOAuth bearer認証の宣言を含むため、公開JSON仕様と認証メタデータの生成確認に利用できます。
 
 ## 主な依存ライブラリ
 
